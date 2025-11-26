@@ -4,7 +4,7 @@
 import os
 import logging
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 import google.generativeai as genai
 from google.generativeai.errors import APIError, ResourceExhaustedError
@@ -13,6 +13,7 @@ from google.generativeai.errors import APIError, ResourceExhaustedError
 # Load secrets from Environment Variables (set in Render)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GENAI_API_KEY = os.environ.get("GEMINI_API_KEY")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL") # Render uses this for the webhook URL
 
 # Set up logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -137,9 +138,8 @@ async def handle_message(update: Update, context):
 # --- 4. FLASK WEBHOOK SETUP ---
 
 app = Flask(__name__)
-# Initialize the Telegram Dispatcher
+dispatcher = None
 if TELEGRAM_TOKEN:
-    from telegram import Bot
     bot = Bot(token=TELEGRAM_TOKEN)
     dispatcher = Dispatcher(bot, None, workers=0)
 
@@ -147,6 +147,24 @@ if TELEGRAM_TOKEN:
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CallbackQueryHandler(handle_callback))
     dispatcher.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    
+    # Set the webhook URL when the app starts.
+    try:
+        # Construct the full webhook URL
+        WEBHOOK_URL = RENDER_EXTERNAL_URL + '/telegram' if RENDER_EXTERNAL_URL else None
+        
+        # Only attempt to set webhook if the external URL is available
+        if WEBHOOK_URL:
+            if bot.set_webhook(url=WEBHOOK_URL):
+                logger.info(f"Webhook set successfully to: {WEBHOOK_URL}")
+            else:
+                logger.error("Failed to set webhook. Check logs.")
+        else:
+             logger.warning("RENDER_EXTERNAL_URL not found. Webhook not set automatically.")
+    except Exception as e:
+        logger.error(f"Failed to set webhook on startup: {e}")
+    
+
 else:
     logger.error("TELEGRAM_TOKEN is not set. Bot cannot run.")
 
@@ -159,11 +177,13 @@ def index():
 async def webhook():
     """Receives and processes incoming updates from Telegram."""
     if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), bot)
-        await dispatcher.process_update(update)
+        if dispatcher:
+            update = Update.de_json(request.get_json(force=True), bot)
+            await dispatcher.process_update(update)
     return 'ok'
 
 if __name__ == "__main__":
-    # This block is usually for local testing only. Render uses gunicorn directly.
-    # We keep it simple since gunicorn will handle the startup via Procfile.
-    print("Application is configured. Ready for deployment by gunicorn.")
+    # This block is primarily for local testing, but we ensure it binds correctly.
+    # The gunicorn command in the Procfile handles the production startup.
+    port = int(os.environ.get('PORT', 5000))
+    print(f"Application is configured. Listening on port {port}. Ready for deployment by gunicorn.")
